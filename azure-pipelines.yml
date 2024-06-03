@@ -1,0 +1,149 @@
+trigger:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+- stage: Build
+  displayName: Build stage
+  jobs:  
+  - job: Build
+    displayName: Build Maven Project
+    steps:
+    - task: Bash@3
+      displayName: 'Install Java 17 and Check Version'
+      inputs:
+        targetType: inline
+        script: |
+          sudo apt-get update
+          sudo apt-get install -y openjdk-17-jdk
+          
+          # Update alternatives
+          sudo update-alternatives --install /usr/bin/java java /usr/lib/jvm/java-17-openjdk-amd64/bin/java 1
+          sudo update-alternatives --install /usr/bin/javac javac /usr/lib/jvm/java-17-openjdk-amd64/bin/javac 1
+          sudo update-alternatives --set java /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+          sudo update-alternatives --set javac /usr/lib/jvm/java-17-openjdk-amd64/bin/javac
+          
+          # Verify installation
+          java --version
+          
+          # Set JAVA_HOME
+          echo "##vso[task.setvariable variable=JAVA_HOME]/usr/lib/jvm/java-17-openjdk-amd64"
+
+    - task: Bash@3
+      displayName: 'Verify JAVA_HOME'
+      inputs:
+        targetType: inline
+        script: |
+          echo "JAVA_HOME is set to: $JAVA_HOME"
+          ls -l $JAVA_HOME
+          java --version
+    - task: Maven@4
+      displayName: 'Maven Package'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'clean package'
+        options: '-Djava.home=$(JAVA_HOME)'
+    - task: CopyFiles@2
+      displayName: 'Copy Files to artifact staging directory'
+      inputs:
+        SourceFolder: '$(System.DefaultWorkingDirectory)'
+        Contents: '**/target/*.?(war|jar)'
+        TargetFolder: $(Build.ArtifactStagingDirectory)
+    - upload: $(Build.ArtifactStagingDirectory)
+      artifact: 
+      
+- stage: Test
+  displayName: Test Stage
+  dependsOn: Build
+  jobs:
+  - job: ParallelTesting
+    displayName: Run Tests in Parallel
+    strategy:
+      parallel: 2  # Number of parallel agents
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - download: current
+      artifact: drop
+    
+    - task: Bash@3
+      displayName: 'Install Java 17 and Set Up Maven'
+      inputs:
+        targetType: inline
+        script: |
+          sudo apt-get update
+          sudo apt-get install -y openjdk-17-jdk
+          sudo update-alternatives --install /usr/bin/java java /usr/lib/jvm/java-17-openjdk-amd64/bin/java 1
+          sudo update-alternatives --install /usr/bin/javac javac /usr/lib/jvm/java-17-openjdk-amd64/bin/javac 1
+
+          sudo update-alternatives --set java /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+          sudo update-alternatives --set javac /usr/lib/jvm/java-17-openjdk-amd64/bin/javac
+          java --version
+          
+          # Set JAVA_HOME
+          echo "##vso[task.setvariable variable=JAVA_HOME]/usr/lib/jvm/java-17-openjdk-amd64"
+    - task: Bash@3
+      displayName: 'Verify JAVA_HOME'
+      inputs:
+        targetType: inline
+        script: |
+          echo "JAVA_HOME is set to: $JAVA_HOME"
+          ls -l $JAVA_HOME
+          java --version
+    - task: Maven@4
+      displayName: 'Run Tests with Maven'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'test'
+        options: '-Djava.home=$(JAVA_HOME)'  # Utilize one core per agent
+  
+- stage: Deploy
+  displayName: Deploy stage
+  dependsOn: Test
+  condition: succeeded()
+  jobs:
+  - deployment: VMDeploy
+    displayName: web
+    environment:
+      name: PetClinic
+      resourceType: VirtualMachine
+    strategy:
+        rolling:
+          maxParallel: 2  #for percentages, mention as x%
+          preDeploy:
+            steps:
+            - download: current
+              artifact: drop
+            - script: echo initialize, cleanup, backup, install certs
+          deploy:
+            steps:
+            - task: Bash@3
+              inputs:
+                targetType: 'inline'
+                script: |
+                  # Ensure the correct path to the jar file is used
+                  JAR_FILE=$(find $(Pipeline.Workspace)/drop -name "*.jar" | head -n 1)
+                  echo "Resolved JAR_FILE path: $JAR_FILE"
+                  
+                  if [ -f "$JAR_FILE" ]; then
+                    echo "Starting deployment with JAR_FILE: $JAR_FILE"
+                    sudo java -jar "$JAR_FILE"
+                  else
+                    echo "Error: JAR file not found"
+                    exit 1
+                  fi
+          routeTraffic:
+            steps:
+            - script: echo routing traffic
+          postRouteTraffic:
+            steps:
+            - script: echo health check post-route traffic
+          on:
+            failure:
+              steps:
+              - script: echo Restore from backup! This is on failure
+            success:
+              steps:
+              - script: echo Notify! This is on success
