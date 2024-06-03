@@ -107,7 +107,7 @@ stages:
   - deployment: VMDeploy
     displayName: web
     environment:
-      name: PetClinic
+      name: trabajo final
       resourceType: VirtualMachine
     strategy:
         rolling:
